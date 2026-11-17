@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sickling Feedback Loop</title>
+<style>
+  :root{--bg:#f7f4ef;--ink:#2b2a28;--line:#e3ddd2}
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg)}
+  body{display:flex;justify-content:center;font-family:system-ui,sans-serif}
+  .wrap{width:min(1040px,100%);padding:18px 14px 28px;display:flex;flex-direction:column;gap:14px}
+  .controls{display:flex;justify-content:center;align-items:center;gap:18px;flex-wrap:wrap}
+  button{appearance:none;border:2px solid var(--line);background:#fff;border-radius:20px;padding:6px;cursor:pointer;
+    display:grid;place-items:center;transition:transform .12s ease,border-color .2s,box-shadow .2s}
+  button:hover{transform:translateY(-2px)}
+  button:active{transform:scale(.96)}
+  button:focus-visible{outline:3px solid #8fb6e8;outline-offset:2px}
+  #exBtn.on{border-color:#c8323c;box-shadow:0 0 0 5px rgba(200,50,60,.14)}
+  #waterBtn.on{border-color:#2f7fd1;box-shadow:0 0 0 5px rgba(47,127,209,.14)}
+  #breathBtn.on{border-color:#2a9d8f;box-shadow:0 0 0 5px rgba(42,157,143,.16)}
+  #breathBtn svg{width:116px;height:116px;display:block}
+  #breathBtn .lung{transform-box:fill-box;transform:scale(.9)}
+  #breathBtn .lungL{transform-origin:100% 18%}
+  #breathBtn .lungR{transform-origin:0% 18%}
+  #breathBtn.on .lung{animation:breathe 4.2s ease-in-out infinite}
+  @keyframes breathe{0%,100%{transform:scale(.84)}50%{transform:scale(1.1)}}
+  @media (prefers-reduced-motion:reduce){#breathBtn.on .lung{animation-duration:8s}}
+  #exBtn canvas{width:116px;height:116px;display:block}
+  #waterBtn svg{width:116px;height:116px;display:block}
+  #resetBtn{border-radius:50%;padding:12px}
+  #resetBtn svg{width:26px;height:26px;display:block}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:18px;overflow:hidden}
+  canvas.full{width:100%;display:block}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="controls">
+    <button id="exBtn" aria-label="Exercise"><canvas id="fig" width="232" height="232"></canvas></button>
+    <button id="waterBtn" aria-label="Drink water">
+      <svg viewBox="0 0 120 120">
+        <defs>
+          <clipPath id="glassClip"><path d="M36 22 L84 22 L77 100 Q76 105 71 105 L49 105 Q44 105 43 100 Z"/></clipPath>
+        </defs>
+        <g clip-path="url(#glassClip)">
+          <rect id="waterRect" x="20" y="40" width="80" height="80" fill="#6aaeea"/>
+          <rect id="waterShine" x="48" y="46" width="5" height="48" rx="2.5" fill="#ffffff" opacity=".45"/>
+        </g>
+        <path d="M36 22 L84 22 L77 100 Q76 105 71 105 L49 105 Q44 105 43 100 Z" fill="none" stroke="#2b2a28" stroke-width="3.2" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <button id="breathBtn" aria-label="Breathe">
+      <svg viewBox="0 0 120 120">
+        <path d="M60 14 V50" fill="none" stroke="#2b2a28" stroke-width="6" stroke-linecap="round"/>
+        <path d="M60 50 Q60 62 44 72 M60 50 Q60 62 76 72" fill="none" stroke="#2b2a28" stroke-width="5" stroke-linecap="round"/>
+        <path class="lung lungL" d="M54 44 C34 40 17 64 17 94 C17 106 27 110 37 107 C48 104 54 96 54 82 Z" fill="#f1a7ae" stroke="#2b2a28" stroke-width="3.2" stroke-linejoin="round"/>
+        <path class="lung lungR" d="M66 44 C86 40 103 64 103 94 C103 106 93 110 83 107 C72 104 66 96 66 82 Z" fill="#f1a7ae" stroke="#2b2a28" stroke-width="3.2" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <button id="resetBtn" aria-label="Reset">
+      <svg viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" fill="none" stroke="#2b2a28" stroke-width="2.2" stroke-linecap="round"/><path d="M19.5 4.2v4.6h-4.6" fill="none" stroke="#2b2a28" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+  <div class="panel"><canvas id="vessel" class="full"></canvas></div>
+  <div class="panel"><canvas id="graph" class="full"></canvas></div>
+</div>
+
+<script>
+(() => {
+  const vc = document.getElementById('vessel'), vx = vc.getContext('2d', { alpha: false });
+  const gc = document.getElementById('graph'),  gx = gc.getContext('2d', { alpha: false });
+  const fc = document.getElementById('fig'),    fx = fc.getContext('2d');
+  const exBtn = document.getElementById('exBtn');
+  const waterBtn = document.getElementById('waterBtn');
+  const breathBtn = document.getElementById('breathBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const waterRect = document.getElementById('waterRect');
+  const waterShine = document.getElementById('waterShine');
+
+  // ---------- virtual vessel space ----------
+  const L = 1000, H = 320, CY = 160, R = 108, XC = 650, RN = 40, SIG = 78, CR = 11;
+  const TAU = Math.PI * 2;
+  const rad = x => R - (R - RN) * Math.exp(-(((x - XC) / SIG) ** 2));
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+
+  // ---------- hemolysis tuning ----------
+  const LYS_AGE = 12;     // seconds a cell must have been stuck before it can burst
+  const LYS_RATE = 0.08;
+  const BREATH_RATE = 2.2;  // how strongly breathing pulls oxygen back up (resting is 0.4)
+  const BREATH_HOLD = 0.55; // cells burn through oxygen this much more slowly while breathing deeply  // bursts per second per eligible cell (higher at the blockage)
+
+  // ---------- sizing & cached layers ----------
+  let DPR = 1, GDPR = 1, QUAL = 1, K = 1, VW = 900, VH = 288, GW = 900, GH = 170;
+  let bgLayer = null, tintGrad = null, gDirty = true;
+  let clotLayer = null, clotCtx = null, clotDirty = true;
+  let P_vessel, P_glow, P_wallA, P_wallB;
+
+  const specks = [];
+  for (let i = 0; i < 140; i++) {
+    const x = Math.random() * L, y = Math.random() * H;
+    if (Math.abs(y - CY) > rad(x) + 10) specks.push({ x, y, r: 2 + Math.random() * 5 });
+  }
+  function vesselPoly(pad) {
+    const p = new Path2D();
+    p.moveTo(-20, CY - rad(-20) - pad);
+    for (let x = -10; x <= L + 20; x += 10) p.lineTo(x, CY - rad(x) - pad);
+    for (let x = L + 20; x >= -20; x -= 10) p.lineTo(x, CY + rad(x) + pad);
+    p.closePath();
+    return p;
+  }
+  function wallPath(pad) {
+    const p = new Path2D();
+    for (const sg of [-1, 1]) {
+      p.moveTo(-20, CY + sg * (rad(-20) + pad));
+      for (let x = -10; x <= L + 20; x += 10) p.lineTo(x, CY + sg * (rad(x) + pad));
+    }
+    return p;
+  }
+  P_vessel = vesselPoly(0); P_glow = vesselPoly(9); P_wallA = wallPath(1.5); P_wallB = wallPath(9);
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 1.5) * QUAL;   // vessel resolution (adaptive)
+    GDPR = Math.min(window.devicePixelRatio || 1, 2);
+    VW = vc.clientWidth || 900; VH = Math.round(VW * H / L);
+    vc.style.height = VH + 'px'; vc.width = Math.round(VW * DPR); vc.height = Math.round(VH * DPR);
+    K = vc.width / L;
+    GW = gc.clientWidth || 900; GH = Math.round(clamp(VW * 0.18, 130, 180));
+    gc.style.height = GH + 'px'; gc.width = Math.round(GW * GDPR); gc.height = Math.round(GH * GDPR);
+
+    // static background: tissue + speckles drawn once
+    bgLayer = mk(vc.width, vc.height);
+    const b = bgLayer.getContext('2d');
+    b.fillStyle = '#f9f0ea'; b.fillRect(0, 0, bgLayer.width, bgLayer.height);
+    b.setTransform(K, 0, 0, K, 0, 0);
+    b.fillStyle = '#f1e0d6'; b.beginPath();
+    for (const s of specks) { b.moveTo(s.x + s.r, s.y); b.arc(s.x, s.y, s.r, 0, TAU); }
+    b.fill();
+
+    clotLayer = mk(vc.width, vc.height); clotCtx = clotLayer.getContext('2d'); clotDirty = true;
+
+    tintGrad = vx.createLinearGradient(XC - 60, 0, XC + 120, 0);
+    tintGrad.addColorStop(0, 'rgba(92,78,138,0)');
+    tintGrad.addColorStop(1, 'rgba(92,78,138,0.55)');
+    sprites.clear();
+    gDirty = true;
+  }
+  window.addEventListener('resize', resize);
+
+  // ---------- cell sprites (each shape is drawn once, then blitted) ----------
+  const OXY = [214, 46, 58], DEOXY = [108, 30, 80];
+  const mixc = (a, b, t) => a.map((v, i) => Math.round(lerp(v, b[i], t)));
+  const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+  const HALF = 19, SQ = 15, OQ = 11;
+  const sprites = new Map();
+
+  function buildSprite(s, ox, stuck) {
+    const px = Math.ceil(2 * HALF * K);
+    const cv = mk(px, px), ctx = cv.getContext('2d');
+    ctx.scale(px / (2 * HALF), px / (2 * HALF));
+    ctx.translate(HALF, HALF);
+    let col = mixc(DEOXY, OXY, ox);
+    if (stuck) col = mixc(col, [70, 22, 40], 0.3);
+    const a = CR * (1 + 0.45 * s);
+    const b = CR * (1 - 0.5 * s);
+    const bend = s * CR * 0.95;
+
+    ctx.beginPath();
+    for (let i = 0; i <= 44; i++) {
+      const th = i / 44 * TAU;
+      const u = Math.cos(th);
+      const px_ = a * u;
+      const py_ = b * Math.sin(th) * (1 - 0.45 * s * u * u) - bend * (1 - u * u) + bend * 0.5;
+      i === 0 ? ctx.moveTo(px_, py_) : ctx.lineTo(px_, py_);
+    }
+    ctx.closePath();
+    ctx.fillStyle = rgb(col); ctx.fill();
+    ctx.lineWidth = 1.4; ctx.strokeStyle = rgb(mixc(col, [40, 10, 20], 0.45), 0.9); ctx.stroke();
+
+    if (s < 0.6) {
+      ctx.beginPath(); ctx.ellipse(0, 0, a * 0.42, b * 0.42, 0, 0, TAU);
+      ctx.fillStyle = `rgba(255,235,235,${0.32 * (1 - s / 0.6)})`; ctx.fill();
+    }
+    if (s > 0.35) {
+      ctx.strokeStyle = `rgba(50,8,28,${0.55 * (s - 0.35) / 0.65})`; ctx.lineWidth = 1.1;
+      for (const off of [-0.3, 0, 0.3]) {
+        ctx.beginPath();
+        for (let k = 0; k <= 12; k++) {
+          const u = -0.72 + 1.44 * k / 12;
+          const x_ = a * u, y_ = -bend * (1 - u * u) + bend * 0.5 + off * b * (1 - u * u);
+          k === 0 ? ctx.moveTo(x_, y_) : ctx.lineTo(x_, y_);
+        }
+        ctx.stroke();
+      }
+    }
+    return cv;
+  }
+  function getSprite(s, ox, stuck) {
+    const si = Math.round(clamp(s, 0, 1) * SQ), oi = Math.round(clamp(ox, 0, 1) * OQ);
+    const key = (si * (OQ + 1) + oi) * 2 + (stuck ? 1 : 0);
+    let sp = sprites.get(key);
+    if (!sp) { sp = buildSprite(si / SQ, oi / OQ, stuck); sprites.set(key, sp); }
+    return sp;
+  }
+
+  // ---------- state ----------
+  const MAXC = 320, DENS = 0.084;
+  let cells, O2, W, ex, breath, drinkPending, histT, drinkAnim, drinkMark, jj, sweat, spawnAcc, exitRate, hyp;
+  let figDirty = true, glassLevel = 40, openT = 1, openS = 1;
+
+  // history (typed ring buffer)
+  const HN = 600;
+  const HO = new Float32Array(HN), HW = new Float32Array(HN), HE = new Uint8Array(HN), HD = new Uint8Array(HN), HB = new Uint8Array(HN);
+  let hn = 0;
+  function pushHist() {
+    if (hn === HN) { HO.copyWithin(0, 1); HW.copyWithin(0, 1); HE.copyWithin(0, 1); HD.copyWithin(0, 1); HB.copyWithin(0, 1); hn--; }
+    HO[hn] = O2; HW[hn] = W; HE[hn] = ex ? 1 : 0; HD[hn] = drinkMark ? 1 : 0; HB[hn] = breath ? 1 : 0; hn++;
+    drinkMark = false; gDirty = true;
+  }
+
+  // free-floating debris from burst cells (structure of arrays)
+  const MAXP = 420;
+  const PX = new Float32Array(MAXP), PY = new Float32Array(MAXP), PVX = new Float32Array(MAXP), PVY = new Float32Array(MAXP);
+  const PS = new Float32Array(MAXP), PL = new Float32Array(MAXP), PC = new Uint8Array(MAXP);
+  let np = 0;
+  const PCOL = ['#8f1d34', '#b83a50', '#6e1a38'];
+  function emitFrom(c) {
+    if (np >= MAXP) return;
+    const th = Math.random() * TAU, sp = 14 + Math.random() * 22;
+    PX[np] = c.x + (Math.random() - 0.5) * CR * 1.8;
+    PY[np] = c.y + (Math.random() - 0.5) * 8;
+    PVX[np] = Math.cos(th) * sp; PVY[np] = Math.sin(th) * sp;
+    PS[np] = 1.2 + Math.random() * 1.5; PL[np] = 1; PC[np] = (Math.random() * 3) | 0;
+    np++;
+  }
+
+  const yOf = c => CY + c.t * (rad(c.x) - CR - 2);
+  function newCell(x, ox) {
+    const c = { x, t: (Math.random() * 2 - 1) * 0.85, ox, s: 0, sick: false, stuck: false, age: 0, lys: 0, em: 0, dead: false, baked: false,
+      k: (Math.random() * 2 - 1) * 0.06, ph: Math.random() * 6.28, spin: 0.6 + Math.random() * 0.6,
+      rot0: (Math.random() - 0.5) * 1.3, alpha: 1, v: 0, y: 0 };
+    c.y = yOf(c);
+    return c;
+  }
+  function reset() {
+    O2 = 0.97; W = 0.85; ex = false; breath = false; drinkPending = 0; hn = 0; histT = 0;
+    drinkAnim = -1; drinkMark = false; jj = 0; sweat = []; spawnAcc = 0;
+    exitRate = DENS * 85; hyp = 0; np = 0; openT = openS = 1; figDirty = true; gDirty = true; clotDirty = true;
+    cells = [];
+    const N = 84;
+    for (let i = 0; i < N; i++) {
+      const x = (i / N) * (L + 40) - 20 + Math.random() * 6;
+      cells.push(newCell(x, clamp(0.97 - 0.03 * Math.max(0, x) / 85, 0, 1)));
+    }
+    exBtn.classList.remove('on'); waterBtn.classList.remove('on'); breathBtn.classList.remove('on');
+  }
+
+  exBtn.addEventListener('click', () => { ex = !ex; figDirty = true; exBtn.classList.toggle('on', ex); });
+  breathBtn.addEventListener('click', () => { breath = !breath; breathBtn.classList.toggle('on', breath); });
+  waterBtn.addEventListener('click', () => {
+    drinkPending += 0.28; drinkAnim = 0; drinkMark = true; waterBtn.classList.add('on');
+  });
+  resetBtn.addEventListener('click', reset);
+
+  // take one cell out of the cached clot layer, repainting only its neighbours
+  function eraseFromClot(c) {
+    const sz = 2 * HALF * K, x0 = c.x * K - sz / 2, y0 = c.y * K - sz / 2;
+    clotCtx.save();
+    clotCtx.setTransform(1, 0, 0, 1, 0, 0);
+    clotCtx.beginPath(); clotCtx.rect(x0, y0, sz, sz); clotCtx.clip();
+    clotCtx.clearRect(x0, y0, sz, sz);
+    for (const d of cells) {
+      if (d === c || !d.baked || Math.abs(d.x - c.x) > 2 * HALF || Math.abs(d.y - c.y) > 2 * HALF) continue;
+      blitCell(clotCtx, d);
+    }
+    clotCtx.restore();
+  }
+
+  // how much of the narrow section is still open (0 = jammed, 1 = clear)
+  const cov = new Uint8Array(20);
+  function measureOpen() {
+    cov.fill(0);
+    for (const c of cells) {
+      if (!c.stuck || c.lys > 0.7 || Math.abs(c.x - XC) > 60) continue;
+      const a = Math.max(0, Math.floor((c.y - 9 - (CY - RN)) / 4));
+      const b = Math.min(19, Math.floor((c.y + 9 - (CY - RN)) / 4));
+      for (let k = a; k <= b; k++) cov[k] = 1;
+    }
+    let free = 0;
+    for (let k = 0; k < 20; k++) if (!cov[k]) free++;
+    openT = clamp((free / 20 - 0.3) / 0.5, 0, 1);   // a mostly-filled throat passes no debris
+  }
+
+  // ---------- simulation ----------
+  function step(dt) {
+    const vb = ex ? 125 : 85;
+    let stuck = 0;
+    for (const c of cells) if (c.stuck) stuck++;
+
+    // oxygen keeps falling as the clot grows and the tissue downstream starves; water drains with exercise
+    O2 += dt * (((breath ? 1 : 0.97) - O2) * (breath ? BREATH_RATE : 0.4) - (ex ? 0.06 : 0) - 0.003 * stuck - 0.08 * hyp);
+    W  -= dt * (ex ? 0.013 : 0.0005);
+    if (drinkPending > 0) { const a = Math.min(drinkPending, dt * 0.06); W += a; drinkPending -= a; }
+    O2 = clamp(O2, 0.03, 1); W = clamp(W, 0.15, 1);
+
+    cells.sort((a, b) => a.x - b.x);
+    const n = cells.length;
+    let dead = false;
+
+    for (let i = 0; i < n; i++) {
+      const c = cells[i];
+      if (c.stuck) {
+        c.v = 0; c.s += (1 - c.s) * Math.min(1, dt * 1.6); c.age += dt;
+        if (c.lys > 0) {                                  // bursting: shrink and shed debris
+          c.lys += dt / 0.8;
+          const target = Math.min(10, Math.floor(c.lys * 10));
+          while (c.em < target) { c.em++; emitFrom(c); }
+          if (c.lys >= 1) { c.dead = true; dead = true; }
+        } else if (!ex && c.age > LYS_AGE) {              // hemolysis only once exercise has stopped
+          const w = 1 + 2 * Math.exp(-(((c.x - XC) / 80) ** 2));
+          if (Math.random() < dt * LYS_RATE * w) { c.lys = 0.001; if (c.baked) { c.baked = false; eraseFromClot(c); } }
+        }
+        continue;
+      }
+
+      // each cell gives up oxygen the longer it is in the tissue
+      c.ox = Math.max(0, c.ox - dt * (ex ? 0.06 : 0.03) * (breath ? BREATH_HOLD : 1));
+      const di = (1 - c.ox) * 0.9 + (1 - W) * 0.6 + c.k - 0.12 - (breath ? 0.05 : 0);
+      if (!c.sick) { if (di > 0.5 && Math.random() < dt * (di - 0.5) * 3) c.sick = true; }
+      else if (di < 0.42 && Math.random() < dt * 2) c.sick = false;
+      c.s += ((c.sick ? 1 : 0) - c.s) * Math.min(1, dt * 1.6);
+
+      // sticking: in the narrowing, or onto the existing mass
+      if (c.s > 0.6 && Math.abs(c.x - XC) < 45 && Math.random() < dt * 0.4) c.stuck = true;
+      if (!c.stuck) {
+        let touch = false;
+        const reach = CR * (2.3 + 0.45 * c.s);
+        for (let j = i - 1; j >= 0 && c.x - cells[j].x < CR * 3.6; j--)
+          if (cells[j].stuck && Math.hypot(cells[j].x - c.x, cells[j].y - c.y) < reach + CR * 0.45 * cells[j].s) { touch = true; break; }
+        if (!touch) for (let j = i + 1; j < n && cells[j].x - c.x < CR * 3.6; j++)
+          if (cells[j].stuck && Math.hypot(cells[j].x - c.x, cells[j].y - c.y) < reach + CR * 0.45 * cells[j].s) { touch = true; break; }
+        if (touch && Math.random() < dt * (c.s > 0.5 ? 0.4 : 0.04)) c.stuck = true;
+      }
+      if (c.stuck) { c.v = 0; continue; }
+
+      let v = vb * (1 - 0.3 * c.t * c.t) * Math.min(2.4, R / rad(c.x));
+      const ai = CR * (1 + 0.45 * c.s);
+      let gap = 1e9;
+      for (let j = i + 1; j < n && cells[j].x - c.x < 70; j++) {
+        const d = cells[j];
+        if (Math.abs(d.t - c.t) > 0.2) continue;
+        const g = d.x - c.x - ai - CR * (1 + 0.45 * d.s);
+        if (g < gap) gap = g;
+      }
+      if (gap < 1e9) v = Math.min(v, Math.max(0, gap * 5));
+      c.v = v;
+    }
+
+    let exits = 0;
+    for (const c of cells) {
+      if (c.stuck) continue;
+      c.x += c.v * dt;
+      c.y = yOf(c);
+      c.ph += dt * c.spin * (c.v / 90);
+      if (c.alpha < 1) c.alpha = Math.min(1, c.alpha + dt * 2);
+      if (c.x > L + 25) exits++;
+    }
+    if (exits || dead) cells = cells.filter(c => c.x <= L + 25 && !c.dead);
+
+    // downstream supply -> tissue colour
+    exitRate = exitRate * (1 - dt * 0.5) + exits * 0.5;
+    const perf = clamp(exitRate / (DENS * 85 * 0.8), 0, 1);
+    hyp += ((1 - perf) - hyp) * Math.min(1, dt * 0.35);
+
+    // debris drifts only as fast as the stream lets it
+    openS += (openT - openS) * Math.min(1, dt * 2);
+    const flow = vb * openS;
+    for (let i = 0; i < np;) {
+      const r = rad(PX[i]);
+      const tt = clamp((PY[i] - CY) / r, -1, 1);
+      const u = flow * (1 - 0.35 * tt * tt) * Math.min(2.4, R / r);
+      PVX[i] += (u - PVX[i]) * Math.min(1, dt * 2.5);
+      PVY[i] = PVY[i] * Math.max(0, 1 - dt * 2.5) + (Math.random() - 0.5) * dt * 20;
+      PX[i] += PVX[i] * dt; PY[i] += PVY[i] * dt;
+      const lim = rad(PX[i]) - 2;
+      if (PY[i] > CY + lim) { PY[i] = CY + lim; PVY[i] *= -0.3; }
+      else if (PY[i] < CY - lim) { PY[i] = CY - lim; PVY[i] *= -0.3; }
+      PL[i] -= dt / (openS > 0.2 ? 90 : 40);
+      if (PX[i] > L + 10 || PL[i] <= 0) {
+        np--;
+        PX[i] = PX[np]; PY[i] = PY[np]; PVX[i] = PVX[np]; PVY[i] = PVY[np]; PS[i] = PS[np]; PL[i] = PL[np]; PC[i] = PC[np];
+        continue;
+      }
+      i++;
+    }
+
+    // new cells keep arriving from the left
+    spawnAcc = Math.min(3, spawnAcc + dt * DENS * vb * 0.9);
+    while (spawnAcc >= 1 && cells.length < MAXC) {
+      let placed = false;
+      for (let tries = 0; tries < 4 && !placed; tries++) {
+        const c = newCell(-22, O2);
+        if (cells.every(d => d.x > -22 + CR * 2.4 || Math.abs(d.y - c.y) > CR * 1.8)) {
+          c.alpha = 0; cells.push(c); placed = true;
+        }
+      }
+      if (!placed) break;
+      spawnAcc -= 1;
+    }
+
+    histT += dt;
+    if (histT >= 0.1) { histT = 0; pushHist(); measureOpen(); }
+  }
+
+  // ---------- drawing: vessel ----------
+  function blitCell(ctx, c) {
+    const s = c.s;
+    const tumble = 0.72 + 0.28 * Math.abs(Math.cos(c.ph));
+    const f = lerp(tumble, 1, s);
+    const rot = c.rot0 * s + Math.sin(c.ph * 0.5) * 0.15 * (1 - s);
+    let sc = 1, al = c.alpha;
+    if (c.lys > 0) { sc = 1 - 0.5 * c.lys; al *= 1 - c.lys; }
+    const co = Math.cos(rot) * K * sc, si = Math.sin(rot) * K * sc;
+    ctx.setTransform(co, si, -si * f, co * f, c.x * K, c.y * K);
+    if (al < 1) ctx.globalAlpha = al;
+    ctx.drawImage(getSprite(s, c.ox, c.stuck), -HALF, -HALF, 2 * HALF, 2 * HALF);
+    if (al < 1) ctx.globalAlpha = 1;
+  }
+
+  function drawVessel() {
+    vx.setTransform(1, 0, 0, 1, 0, 0);
+    vx.drawImage(bgLayer, 0, 0);
+    vx.setTransform(K, 0, 0, K, 0, 0);
+
+    // tissue beyond the blockage loses its supply
+    if (hyp > 0.01) {
+      vx.globalAlpha = hyp; vx.fillStyle = tintGrad;
+      vx.fillRect(XC - 60, 0, L - XC + 60, H);
+      vx.globalAlpha = 1;
+    }
+    vx.fillStyle = '#efcfc9'; vx.fill(P_glow);
+    const wt = clamp((W - 0.15) / 0.85, 0, 1);   // plasma: darker / thicker when dehydrated
+    vx.fillStyle = `rgb(${Math.round(lerp(226, 253, wt))},${Math.round(lerp(176, 238, wt))},${Math.round(lerp(120, 214, wt))})`;
+    vx.fill(P_vessel);
+
+    // settled clot cells are baked into a cached layer; only moving or changing cells are drawn each frame
+    if (clotDirty) {
+      clotCtx.setTransform(1, 0, 0, 1, 0, 0);
+      clotCtx.clearRect(0, 0, clotLayer.width, clotLayer.height);
+      for (let i = 0, n = cells.length; i < n; i++) if (cells[i].baked) blitCell(clotCtx, cells[i]);
+      clotDirty = false;
+    }
+    for (let i = 0, n = cells.length; i < n; i++) {
+      const c = cells[i];
+      if (c.stuck && !c.baked && c.lys === 0 && c.alpha >= 1 && c.s > 0.985) { blitCell(clotCtx, c); c.baked = true; }
+    }
+    for (let pass = 0; pass < 2; pass++) {                       // free cells, normal first then sickled
+      for (let i = 0, n = cells.length; i < n; i++) {
+        const c = cells[i];
+        if (c.stuck || (c.s >= 0.5) !== (pass === 1)) continue;
+        blitCell(vx, c);
+      }
+    }
+    vx.setTransform(1, 0, 0, 1, 0, 0);
+    vx.drawImage(clotLayer, 0, 0);
+    for (let i = 0, n = cells.length; i < n; i++) {              // clot cells still settling or bursting
+      const c = cells[i];
+      if (c.stuck && !c.baked) blitCell(vx, c);
+    }
+    vx.setTransform(K, 0, 0, K, 0, 0);
+
+    // debris from burst cells
+    if (np) {
+      for (let ci = 0; ci < 3; ci++) {
+        vx.beginPath();
+        for (let i = 0; i < np; i++) {
+          if (PC[i] !== ci) continue;
+          const r = PS[i] * Math.min(1, PL[i] * 5);
+          vx.moveTo(PX[i] + r, PY[i]); vx.arc(PX[i], PY[i], r, 0, TAU);
+        }
+        vx.fillStyle = PCOL[ci]; vx.fill();
+      }
+    }
+
+    vx.lineCap = 'round';
+    vx.strokeStyle = '#b4545d'; vx.lineWidth = 5; vx.stroke(P_wallA);
+    vx.strokeStyle = 'rgba(180,84,93,.35)'; vx.lineWidth = 2; vx.stroke(P_wallB);
+  }
+
+  // ---------- drawing: graph (only when new data arrives) ----------
+  function drawDrop(ctx, x, y, color) {
+    ctx.beginPath();
+    ctx.moveTo(x, y - 11);
+    ctx.bezierCurveTo(x + 3, y - 6, x + 7, y - 2, x + 7, y + 2);
+    ctx.arc(x, y + 2, 7, 0, Math.PI, false);
+    ctx.bezierCurveTo(x - 7, y - 2, x - 3, y - 6, x, y - 11);
+    ctx.fillStyle = color; ctx.fill();
+  }
+  function drawGraph(force) {
+    if (!gDirty && !force) return;
+    gDirty = false;
+    gx.setTransform(GDPR, 0, 0, GDPR, 0, 0);
+    gx.fillStyle = '#fff'; gx.fillRect(0, 0, GW, GH);
+    const pad = 16, x0 = pad, x1 = GW - 48, y0 = pad, y1 = GH - pad;
+    const X = i => x0 + (i / (HN - 1)) * (x1 - x0);
+    const Y = v => y1 - v * (y1 - y0);
+
+    gx.strokeStyle = '#efeae2'; gx.lineWidth = 1; gx.beginPath();
+    for (let k = 0; k <= 4; k++) { const y = Y(k / 4); gx.moveTo(x0, y); gx.lineTo(x1, y); }
+    gx.stroke();
+
+    for (const [arr, col] of [[HE, 'rgba(200,50,60,.08)'], [HB, 'rgba(42,157,143,.09)']]) {
+      gx.fillStyle = col;
+      let start = -1;
+      for (let i = 0; i <= hn; i++) {
+        const on = i < hn && arr[i];
+        if (on && start < 0) start = i;
+        if (!on && start >= 0) { gx.fillRect(X(start), y0, X(i) - X(start), y1 - y0); start = -1; }
+      }
+    }
+    gx.strokeStyle = 'rgba(47,127,209,.35)'; gx.lineWidth = 2; gx.setLineDash([4, 4]); gx.beginPath();
+    for (let i = 0; i < hn; i++) if (HD[i]) { gx.moveTo(X(i), y0); gx.lineTo(X(i), y1); }
+    gx.stroke(); gx.setLineDash([]);
+
+    const line = (arr, color) => {
+      if (hn < 2) return;
+      gx.beginPath();
+      for (let i = 0; i < hn; i++) { const x = X(i), y = Y(arr[i]); i ? gx.lineTo(x, y) : gx.moveTo(x, y); }
+      gx.strokeStyle = color; gx.lineWidth = 3.2; gx.lineJoin = 'round'; gx.lineCap = 'round'; gx.stroke();
+    };
+    line(HW, '#2f7fd1');
+    line(HO, '#c8323c');
+
+    if (hn) {
+      const i = hn - 1;
+      const ox = X(i) + 18, oy = Y(HO[i]);
+      for (const dx of [-5, 5]) {
+        gx.beginPath(); gx.arc(ox + dx, oy, 7, 0, TAU);
+        gx.fillStyle = '#c8323c'; gx.fill();
+        gx.lineWidth = 2; gx.strokeStyle = '#fff'; gx.stroke();
+      }
+      drawDrop(gx, X(i) + 18, Y(HW[i]) + 2, '#2f7fd1');
+    }
+  }
+
+  // ---------- drawing: stick figure (only while something is moving) ----------
+  function drawFigure(dt, force) {
+    if (!ex && !sweat.length && !figDirty && !force) return;
+    figDirty = false;
+    const S = 232;
+    fx.setTransform(1, 0, 0, 1, 0, 0);
+    fx.clearRect(0, 0, S, S);
+    let k = 0;
+    if (ex) { jj += dt * TAU * 1.5; k = (1 - Math.cos(jj)) / 2; } else jj = 0;
+    const lift = ex ? 10 * Math.sin(Math.PI * k) : 0;
+    const cx = 116, base = 196 - lift;
+
+    fx.strokeStyle = '#e8e2d8'; fx.lineWidth = 4; fx.lineCap = 'round';
+    fx.beginPath(); fx.moveTo(40, 204); fx.lineTo(192, 204); fx.stroke();
+
+    const hipY = base - 64, shY = hipY - 52, headY = shY - 24;
+    fx.strokeStyle = '#2b2a28'; fx.lineWidth = 8; fx.lineJoin = 'round';
+    const legA = lerp(0.12, 0.5, k), legL = 66;
+    for (const sg of [-1, 1]) {
+      fx.beginPath(); fx.moveTo(cx, hipY);
+      fx.lineTo(cx + sg * Math.sin(legA) * legL, hipY + Math.cos(legA) * legL); fx.stroke();
+    }
+    fx.beginPath(); fx.moveTo(cx, hipY); fx.lineTo(cx, shY - 6); fx.stroke();
+    const armA = lerp(0.28, 2.75, k), armL = 50;
+    for (const sg of [-1, 1]) {
+      fx.beginPath(); fx.moveTo(cx, shY);
+      fx.lineTo(cx + sg * Math.sin(armA) * armL, shY + Math.cos(armA) * armL); fx.stroke();
+    }
+    fx.beginPath(); fx.arc(cx, headY, 15, 0, TAU);
+    fx.fillStyle = '#fff'; fx.fill(); fx.stroke();
+
+    if (ex && Math.random() < dt * 5) {
+      const sg = Math.random() < 0.5 ? -1 : 1;
+      sweat.push({ x: cx + sg * 16, y: headY - 4, vx: sg * (30 + Math.random() * 40), vy: -40 - Math.random() * 30, life: 1 });
+    }
+    for (const d of sweat) { d.vy += 160 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.life -= dt * 1.1; }
+    sweat = sweat.filter(d => d.life > 0);
+    for (const d of sweat) {
+      fx.save(); fx.globalAlpha = Math.max(0, d.life);
+      drawDrop(fx, d.x, d.y, '#5aa0e6'); fx.restore();
+    }
+  }
+
+  // ---------- glass (touches the DOM only while it is animating) ----------
+  function updateGlass(dt) {
+    let level = 40;
+    if (drinkAnim >= 0) {
+      drinkAnim += dt;
+      if (drinkAnim < 2.2) level = lerp(40, 104, drinkAnim / 2.2);
+      else if (drinkAnim < 2.8) { const t = (drinkAnim - 2.2) / 0.6; level = lerp(104, 40, t * t * (3 - 2 * t)); }
+      else { drinkAnim = -1; waterBtn.classList.remove('on'); }
+    }
+    if (level !== glassLevel) {
+      glassLevel = level;
+      waterRect.setAttribute('y', level.toFixed(1));
+      waterShine.setAttribute('y', (level + 6).toFixed(1));
+      waterShine.setAttribute('height', Math.max(0, 94 - level).toFixed(1));
+    }
+  }
+
+  // ---------- loop (drops vessel resolution if the device can't keep up) ----------
+  let last = performance.now(), emaDt = 16, slowT = 0;
+  function frame(now) {
+    const raw = now - last; last = now;
+    const dt = Math.min(0.05, raw / 1000);
+    step(dt);
+    drawVessel();
+    drawGraph();
+    drawFigure(dt);
+    updateGlass(dt);
+    if (raw < 250) {
+      emaDt += (raw - emaDt) * 0.05;
+      if (emaDt > 36 && QUAL > 0.55) {
+        slowT += raw;
+        if (slowT > 1500) { QUAL *= 0.8; slowT = 0; emaDt = 16; resize(); }
+      } else slowT = 0;
+    }
+    requestAnimationFrame(frame);
+  }
+  reset(); resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
