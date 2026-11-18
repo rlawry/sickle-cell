@@ -17,6 +17,8 @@
   button:active{transform:scale(.96)}
   button:focus-visible{outline:3px solid #8fb6e8;outline-offset:2px}
   #exBtn.on{border-color:#c8323c;box-shadow:0 0 0 5px rgba(200,50,60,.14)}
+  #exBtn.off{opacity:.5;cursor:not-allowed}
+  #exBtn.off:hover{transform:none}
   #waterBtn.on{border-color:#2f7fd1;box-shadow:0 0 0 5px rgba(47,127,209,.14)}
   #breathBtn.on{border-color:#2a9d8f;box-shadow:0 0 0 5px rgba(42,157,143,.16)}
   #breathBtn svg{width:116px;height:116px;display:block}
@@ -88,9 +90,11 @@
 
   // ---------- hemolysis tuning ----------
   const LYS_AGE = 12;     // seconds a cell must have been stuck before it can burst
-  const LYS_RATE = 0.08;
+  const LYS_RATE = 0.08;    // bursts per second per eligible cell (higher at the blockage)
   const BREATH_RATE = 2.2;  // how strongly breathing pulls oxygen back up (resting is 0.4)
-  const BREATH_HOLD = 0.55; // cells burn through oxygen this much more slowly while breathing deeply  // bursts per second per eligible cell (higher at the blockage)
+  const BREATH_HOLD = 0.55; // cells burn through oxygen this much more slowly while breathing deeply
+  const SEV_O2 = 0.55, SEV_HYP = 0.6;   // the person collapses when oxygen is below / starvation above these
+  const OK_O2 = 0.75, OK_HYP = 0.3;     // ...and stands again once flow is back to roughly normal
 
   // ---------- sizing & cached layers ----------
   let DPR = 1, GDPR = 1, QUAL = 1, K = 1, VW = 900, VH = 288, GW = 900, GH = 170;
@@ -209,6 +213,7 @@
   const MAXC = 320, DENS = 0.084;
   let cells, O2, W, ex, breath, drinkPending, histT, drinkAnim, drinkMark, jj, sweat, spawnAcc, exitRate, hyp;
   let figDirty = true, glassLevel = 40, openT = 1, openS = 1;
+  let down = false, fall = 0, kk = 0, normalT = 0, locked = false;
 
   // history (typed ring buffer)
   const HN = 600;
@@ -247,17 +252,20 @@
   function reset() {
     O2 = 0.97; W = 0.85; ex = false; breath = false; drinkPending = 0; hn = 0; histT = 0;
     drinkAnim = -1; drinkMark = false; jj = 0; sweat = []; spawnAcc = 0;
-    exitRate = DENS * 85; hyp = 0; np = 0; openT = openS = 1; figDirty = true; gDirty = true; clotDirty = true;
+    exitRate = DENS * 85; hyp = 0; down = false; fall = 0; kk = 0; normalT = 0; np = 0; openT = openS = 1; figDirty = true; gDirty = true; clotDirty = true;
     cells = [];
     const N = 84;
     for (let i = 0; i < N; i++) {
       const x = (i / N) * (L + 40) - 20 + Math.random() * 6;
       cells.push(newCell(x, clamp(0.97 - 0.03 * Math.max(0, x) / 85, 0, 1)));
     }
-    exBtn.classList.remove('on'); waterBtn.classList.remove('on'); breathBtn.classList.remove('on');
+    exBtn.classList.remove('on', 'off'); waterBtn.classList.remove('on'); breathBtn.classList.remove('on'); locked = false;
   }
 
-  exBtn.addEventListener('click', () => { ex = !ex; figDirty = true; exBtn.classList.toggle('on', ex); });
+  exBtn.addEventListener('click', () => {
+    if (down || fall > 0.001) return;          // can't exercise while collapsed
+    ex = !ex; figDirty = true; exBtn.classList.toggle('on', ex);
+  });
   breathBtn.addEventListener('click', () => { breath = !breath; breathBtn.classList.toggle('on', breath); });
   waterBtn.addEventListener('click', () => {
     drinkPending += 0.28; drinkAnim = 0; drinkMark = true; waterBtn.classList.add('on');
@@ -341,7 +349,7 @@
           if (cells[j].stuck && Math.hypot(cells[j].x - c.x, cells[j].y - c.y) < reach + CR * 0.45 * cells[j].s) { touch = true; break; }
         if (!touch) for (let j = i + 1; j < n && cells[j].x - c.x < CR * 3.6; j++)
           if (cells[j].stuck && Math.hypot(cells[j].x - c.x, cells[j].y - c.y) < reach + CR * 0.45 * cells[j].s) { touch = true; break; }
-        if (touch && Math.random() < dt * (c.s > 0.5 ? 0.4 : 0.04)) c.stuck = true;
+        if (touch && c.s > 0.5 && Math.random() < dt * 0.4) c.stuck = true;   // only sickled cells stick to the mass
       }
       if (c.stuck) { c.v = 0; continue; }
 
@@ -373,6 +381,17 @@
     exitRate = exitRate * (1 - dt * 0.5) + exits * 0.5;
     const perf = clamp(exitRate / (DENS * 85 * 0.8), 0, 1);
     hyp += ((1 - perf) - hyp) * Math.min(1, dt * 0.35);
+
+    // collapse when starved of oxygen and blood flow; get back up once both have recovered for a couple of seconds
+    if (!down) {
+      if (O2 < SEV_O2 && hyp > SEV_HYP) {
+        down = true; normalT = 0; figDirty = true;
+        if (ex) { ex = false; exBtn.classList.remove('on'); }
+      }
+    } else if (hyp < OK_HYP && O2 > OK_O2) {
+      normalT += dt;
+      if (normalT > 2) { down = false; figDirty = true; }
+    } else normalT = 0;
 
     // debris drifts only as fast as the stream lets it
     openS += (openT - openS) * Math.min(1, dt * 2);
@@ -546,39 +565,80 @@
   }
 
   // ---------- drawing: stick figure (only while something is moving) ----------
+  const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
   function drawFigure(dt, force) {
-    if (!ex && !sweat.length && !figDirty && !force) return;
+    const target = down ? 1 : 0;
+    if (!ex && !sweat.length && !figDirty && !force && fall === target && !down && kk < 0.01) return;
     figDirty = false;
+    if (fall !== target) fall = clamp(fall + (target > fall ? dt / 1.1 : -dt / 1.7), 0, 1);
+
     const S = 232;
     fx.setTransform(1, 0, 0, 1, 0, 0);
     fx.clearRect(0, 0, S, S);
-    let k = 0;
-    if (ex) { jj += dt * TAU * 1.5; k = (1 - Math.cos(jj)) / 2; } else jj = 0;
-    const lift = ex ? 10 * Math.sin(Math.PI * k) : 0;
+
+    // jumping-jack phase (eases out smoothly if exercise is cut off mid-jump)
+    let k;
+    if (ex) { jj += dt * TAU * 1.5; k = kk = (1 - Math.cos(jj)) / 2; }
+    else { jj = 0; kk += (0 - kk) * Math.min(1, dt * 8); if (kk < 0.01) kk = 0; k = kk; }
+    const lift = 10 * Math.sin(Math.PI * k);
     const cx = 116, base = 196 - lift;
+
+    // collapse comes in stages: hands to stomach and hunch, then the legs give way
+    const eA = smooth(0, 0.5, fall), eT = smooth(0.1, 0.8, fall), eL = smooth(0.35, 1, fall);
 
     fx.strokeStyle = '#e8e2d8'; fx.lineWidth = 4; fx.lineCap = 'round';
     fx.beginPath(); fx.moveTo(40, 204); fx.lineTo(192, 204); fx.stroke();
 
-    const hipY = base - 64, shY = hipY - 52, headY = shY - 24;
-    fx.strokeStyle = '#2b2a28'; fx.lineWidth = 8; fx.lineJoin = 'round';
+    const hipS = base - 64;
+    const hipY = lerp(hipS, 163, eL);
+    const shY = hipY - lerp(52, 30, eT), shX = cx + lerp(0, 6, eT);
+    const headX = cx + lerp(0, 15, eT), headY = shY - lerp(24, 10, eT);
+
+    fx.strokeStyle = '#2b2a28'; fx.lineWidth = 8; fx.lineJoin = 'round'; fx.lineCap = 'round';
+
+    // legs: hip -> knee -> foot (standing legs are straight; kneeling knees touch the ground)
     const legA = lerp(0.12, 0.5, k), legL = 66;
     for (const sg of [-1, 1]) {
-      fx.beginPath(); fx.moveTo(cx, hipY);
-      fx.lineTo(cx + sg * Math.sin(legA) * legL, hipY + Math.cos(legA) * legL); fx.stroke();
+      const fS = [cx + sg * Math.sin(legA) * legL, hipS + Math.cos(legA) * legL];
+      const kS = [(cx + fS[0]) / 2, (hipS + fS[1]) / 2];
+      const kK = [cx + sg * 26, 198], fK = [cx + sg * 46, 199];
+      const kn = [lerp(kS[0], kK[0], eL), lerp(kS[1], kK[1], eL)];
+      const ft = [lerp(fS[0], fK[0], eL), lerp(fS[1], fK[1], eL)];
+      fx.beginPath(); fx.moveTo(cx, hipY); fx.lineTo(kn[0], kn[1]); fx.lineTo(ft[0], ft[1]); fx.stroke();
     }
-    fx.beginPath(); fx.moveTo(cx, hipY); fx.lineTo(cx, shY - 6); fx.stroke();
+    // torso
+    fx.beginPath(); fx.moveTo(cx, hipY); fx.lineTo(shX, shY - lerp(6, 0, eT)); fx.stroke();
+
+    // arms: shoulder -> elbow -> hand (jumping-jack swing, or both hands clutching the stomach)
     const armA = lerp(0.28, 2.75, k), armL = 50;
+    const bellyY = shY + (hipY - shY) * 0.55;
     for (const sg of [-1, 1]) {
-      fx.beginPath(); fx.moveTo(cx, shY);
-      fx.lineTo(cx + sg * Math.sin(armA) * armL, shY + Math.cos(armA) * armL); fx.stroke();
+      const hS = [shX + sg * Math.sin(armA) * armL, shY + Math.cos(armA) * armL];
+      const eS = [(shX + hS[0]) / 2, (shY + hS[1]) / 2];
+      const hB = [cx + sg * 6, bellyY], eB = [shX + sg * 25, bellyY - 4];
+      const el = [lerp(eS[0], eB[0], eA), lerp(eS[1], eB[1], eA)];
+      const hd = [lerp(hS[0], hB[0], eA), lerp(hS[1], hB[1], eA)];
+      fx.beginPath(); fx.moveTo(shX, shY); fx.lineTo(el[0], el[1]); fx.lineTo(hd[0], hd[1]); fx.stroke();
     }
-    fx.beginPath(); fx.arc(cx, headY, 15, 0, TAU);
+    fx.beginPath(); fx.arc(headX, headY, 15, 0, TAU);
     fx.fillStyle = '#fff'; fx.fill(); fx.stroke();
 
-    if (ex && Math.random() < dt * 5) {
+    // pain marks radiating from the stomach (pulse while the person is down)
+    if (eA > 0.7) {
+      const a = (eA - 0.7) / 0.3 * (0.55 + 0.45 * Math.sin(performance.now() / 130));
+      fx.strokeStyle = `rgba(200,50,60,${a.toFixed(3)})`; fx.lineWidth = 4;
+      fx.beginPath();
+      for (const sg of [-1, 1]) for (const ang of [-0.55, 0, 0.55]) {
+        const dx = Math.cos(ang) * sg, dy = Math.sin(ang);
+        fx.moveTo(cx + 3 + dx * 34, bellyY + dy * 34); fx.lineTo(cx + 3 + dx * 44, bellyY + dy * 44);
+      }
+      fx.stroke();
+    }
+
+    // sweat while exercising, and while struggling on the ground
+    if ((ex || fall > 0.6) && Math.random() < dt * (ex ? 5 : 2.5)) {
       const sg = Math.random() < 0.5 ? -1 : 1;
-      sweat.push({ x: cx + sg * 16, y: headY - 4, vx: sg * (30 + Math.random() * 40), vy: -40 - Math.random() * 30, life: 1 });
+      sweat.push({ x: headX + sg * 16, y: headY - 4, vx: sg * (30 + Math.random() * 40), vy: -40 - Math.random() * 30, life: 1 });
     }
     for (const d of sweat) { d.vy += 160 * dt; d.x += d.vx * dt; d.y += d.vy * dt; d.life -= dt * 1.1; }
     sweat = sweat.filter(d => d.life > 0);
@@ -614,6 +674,8 @@
     drawVessel();
     drawGraph();
     drawFigure(dt);
+    const lock = down || fall > 0.001;
+    if (lock !== locked) { locked = lock; exBtn.classList.toggle('off', lock); exBtn.setAttribute('aria-disabled', lock ? 'true' : 'false'); }
     updateGlass(dt);
     if (raw < 250) {
       emaDt += (raw - emaDt) * 0.05;
